@@ -28,7 +28,7 @@
 
 OperameLanguage::Texts T;
 
-enum Driver { AQC, MHZ };
+enum Driver { AQC, MHZ, CUB };
 
 Driver            driver;
 MQTTClient        mqtt;
@@ -384,10 +384,57 @@ void mhz_set_zero() {
     mhz.calibrate();
 }
 
+int cub_get_co2() {
+    static bool initialized = false;
+
+    const uint8_t command[4] = { 0x11, 0x01, 0x01, 0xED };
+    uint8_t response[8];
+    int co2 = -1;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        flush(hwserial1);
+        hwserial1.write(command, sizeof(command));
+        delay(50);
+
+        size_t c = hwserial1.readBytes(response, sizeof(response));
+        if (c != sizeof(response) || response[0] != 0x16 || response[1] != 0x05 || response[2] != 0x01) {
+            continue;
+        }
+        
+        uint8_t checksum = 255;
+        for (int i = 0; i < sizeof(response) - 1; i++) {
+            checksum -= response[i];
+        }
+        if (response[7] == checksum+1) {
+            co2 = response[3] * 256 + response[4];
+            break;
+        }
+        delay(50);
+    }
+
+    if (co2 < 0) {
+        initialized = false;
+        return co2;
+    }
+
+    if (!initialized && (co2 == 9999 || co2 == 400)) return 0;
+    initialized = true;
+    return co2;
+}
+
+void cub_set_zero() {
+    // Calibrate to 400 ppm
+    // Command not tested!
+    const uint8_t command[6] = { 0x11, 0x03, 0x03, 0x01, 0x90, 0x88 };
+    flush(hwserial1);
+    hwserial1.write(command, sizeof(command));
+}
+
 int get_co2() {
     // <0 means read error, 0 means still initializing, >0 is PPM value
 
     if (driver == AQC) return aqc_get_co2();
+    if (driver == CUB) return cub_get_co2();
     if (driver == MHZ) return mhz_get_co2();
 
     // Should be unreachable
@@ -397,6 +444,7 @@ int get_co2() {
 
 void set_zero() {
     if (driver == AQC) { aqc_set_zero(); return; }
+    if (driver == CUB) {cub_set_zero(); return; }
     if (driver == MHZ) { mhz_set_zero(); return; }
 
     // Should be unreachable
@@ -447,6 +495,10 @@ void setup() {
         driver = AQC;
         hwserial1.setTimeout(100);
         Serial.println("Using AQC driver.");
+    } else if (cub_get_co2() >=0) {
+        driver = CUB;
+        hwserial1.setTimeout(100);
+        Serial.println("Using Cubuc driver.");
     } else {
         driver = MHZ;
         mhz_setup();
